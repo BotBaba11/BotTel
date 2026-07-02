@@ -2,6 +2,11 @@ import os
 import asyncio
 import aiohttp
 import datetime
+import re
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import uvicorn
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
@@ -12,10 +17,26 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 CHESS_API = "https://api.chess.com/pub/player"
 IP_API = "https://ipinfojimpro.vercel.app/ipinfo"
+PORT = int(os.environ.get("PORT", 8000))
 
-# ==================== MAIN MENU BUTTONS ====================
+# ==================== FASTAPI APP ====================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start bot when FastAPI starts"""
+    print("🚀 Server starting...")
+    
+    # Start bot in background
+    asyncio.create_task(start_bot())
+    
+    yield
+    
+    print("🛑 Server shutting down...")
+
+app = FastAPI(lifespan=lifespan)
+
+# ==================== TELEGRAM BOT ====================
 def get_main_keyboard():
-    """Main menu keyboard with buttons"""
+    """Main menu keyboard"""
     keyboard = [
         [InlineKeyboardButton("♟️ Chess Player Info", callback_data="chess")],
         [InlineKeyboardButton("🌍 IP Location Finder", callback_data="ip")],
@@ -24,9 +45,8 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== START COMMAND ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/start command - shows main menu"""
+    """/start command"""
     user = update.effective_user
     welcome_msg = f"""
 👋 **Hello {user.first_name}!**
@@ -44,7 +64,6 @@ I'm a multi-purpose bot with following features:
         parse_mode="Markdown"
     )
 
-# ==================== BUTTON HANDLERS ====================
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button clicks"""
     query = update.callback_query
@@ -80,8 +99,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📌 **Commands:**
 /start - Show Main Menu
 /help - Get Help
-
-👨‍💻 **Developer:** @yourusername
 """
         await query.edit_message_text(
             about_text,
@@ -97,7 +114,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['mode'] = None
 
-# ==================== CHESS API HANDLER ====================
 async def get_chess_player(username: str):
     """Fetch Chess.com player data"""
     async with aiohttp.ClientSession() as session:
@@ -106,15 +122,13 @@ async def get_chess_player(username: str):
             async with session.get(url) as resp:
                 if resp.status == 200:
                     return await resp.json()
-                else:
-                    return None
+                return None
         except:
             return None
 
 def format_chess_data(data: dict, username: str):
     """Format chess player data"""
     try:
-        # Convert timestamps
         last_online = datetime.datetime.fromtimestamp(data.get('last_online', 0)).strftime('%Y-%m-%d %H:%M:%S')
         joined = datetime.datetime.fromtimestamp(data.get('joined', 0)).strftime('%Y-%m-%d')
         
@@ -137,7 +151,6 @@ def format_chess_data(data: dict, username: str):
     except:
         return "❌ Error parsing player data"
 
-# ==================== IP API HANDLER ====================
 async def get_ip_info(ip: str):
     """Fetch IP location data"""
     async with aiohttp.ClientSession() as session:
@@ -177,23 +190,19 @@ def format_ip_data(data: dict, ip: str):
 
 🛡️ **Threat Info:**
 • VPN: {data.get('threat', {}).get('is_vpn', False)}
-• Proxy: {data.get('threat', {}).get('is_proxy', False)}
 • Trust Score: {data.get('threat', {}).get('scores', {}).get('trust_score', 'N/A')}%
 """
         return msg
     except:
         return "❌ Error parsing IP data"
 
-# ==================== MESSAGE HANDLER ====================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user messages based on mode"""
+    """Handle user messages"""
     text = update.message.text.strip()
     mode = context.user_data.get('mode')
     
     if mode == 'chess':
-        # Show typing indicator
         await update.message.chat.send_action(action="typing")
-        
         data = await get_chess_player(text)
         if data:
             msg = format_chess_data(data, text)
@@ -205,12 +214,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="back")]
             ])
-        
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
         
     elif mode == 'ip':
-        # Validate IP format (simple check)
-        import re
         ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
         if not re.match(ip_pattern, text):
             await update.message.reply_text(
@@ -220,7 +226,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         await update.message.chat.send_action(action="typing")
-        
         data = await get_ip_info(text)
         if data:
             msg = format_ip_data(data, text)
@@ -232,16 +237,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back", callback_data="back")]
             ])
-        
         await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-    
     else:
         await update.message.reply_text(
             "Please use the buttons below to select a feature.",
             reply_markup=get_main_keyboard()
         )
 
-# ==================== HELP COMMAND ====================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/help command"""
     help_text = """
@@ -258,41 +260,34 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **Commands:**
 /start - Show main menu
 /help - Show this help
-
-**Example Usernames:**
-• `jim`
-• `hikaru`
-• `magnuscarlsen`
-
-**Example IPs:**
-• `161.185.160.93`
-• `8.8.8.8`
 """
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
-# ==================== ERROR HANDLER ====================
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log errors"""
-    print(f"Update {update} caused error {context.error}")
-
-# ==================== MAIN ====================
-def main():
-    """Start the bot"""
+async def start_bot():
+    """Start Telegram bot in background"""
     print("🤖 Bot starting...")
-    
-    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_error_handler(error_handler)
     
-    # Start bot
     print("✅ Bot is running!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+# ==================== FASTAPI ENDPOINTS ====================
+@app.get("/")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "ok", "message": "Bot is running!"}
+
+@app.get("/ping")
+async def ping():
+    """Ping endpoint for uptime monitoring"""
+    return {"status": "alive"}
+
+# ==================== MAIN ====================
 if __name__ == "__main__":
-    main()
+    print(f"🚀 Starting server on port {PORT}")
+    uvicorn.run("app:app", host="0.0.0.0", port=PORT)
