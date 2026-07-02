@@ -1,136 +1,100 @@
+# app.py
+from flask import Flask, request, jsonify
+import requests
 import os
-import asyncio
-import aiohttp
-import datetime
 import re
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import uvicorn
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from dotenv import load_dotenv
+import datetime
+import json
 
-load_dotenv()
+app = Flask(__name__)
 
 # ==================== CONFIG ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("BOT_TOKEN not set!")
+
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TOKEN}"
 CHESS_API = "https://api.chess.com/pub/player"
 IP_API = "https://ipinfojimpro.vercel.app/ipinfo"
-PORT = int(os.environ.get("PORT", 8000))
 
-# ==================== FASTAPI APP ====================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Start bot when FastAPI starts"""
-    print("🚀 Server starting...")
+# ==================== HELPER FUNCTIONS ====================
+def send_message(chat_id, text, reply_markup=None):
+    """Send message to Telegram"""
+    url = f"{TELEGRAM_API_URL}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
     
-    # Start bot in background
-    asyncio.create_task(start_bot())
-    
-    yield
-    
-    print("🛑 Server shutting down...")
+    response = requests.post(url, json=payload)
+    return response.json()
 
-app = FastAPI(lifespan=lifespan)
+def edit_message(chat_id, message_id, text, reply_markup=None):
+    """Edit existing message"""
+    url = f"{TELEGRAM_API_URL}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    
+    response = requests.post(url, json=payload)
+    return response.json()
 
-# ==================== TELEGRAM BOT ====================
+def answer_callback(callback_id, text=None):
+    """Answer callback query"""
+    url = f"{TELEGRAM_API_URL}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    requests.post(url, json=payload)
+
 def get_main_keyboard():
     """Main menu keyboard"""
-    keyboard = [
-        [InlineKeyboardButton("♟️ Chess Player Info", callback_data="chess")],
-        [InlineKeyboardButton("🌍 IP Location Finder", callback_data="ip")],
-        [InlineKeyboardButton("📊 About Bot", callback_data="about")],
-        [InlineKeyboardButton("👨‍💻 Developer", url="https://t.me/yourusername")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    return {
+        "inline_keyboard": [
+            [{"text": "♟️ Chess Player Info", "callback_data": "chess"}],
+            [{"text": "🌍 IP Location Finder", "callback_data": "ip"}],
+            [{"text": "📊 About Bot", "callback_data": "about"}],
+            [{"text": "👨‍💻 Developer", "url": "https://t.me/yourusername"}]
+        ]
+    }
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/start command"""
-    user = update.effective_user
-    welcome_msg = f"""
-👋 **Hello {user.first_name}!**
+def get_back_button():
+    """Back button"""
+    return {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Menu", "callback_data": "back"}]
+        ]
+    }
 
-I'm a multi-purpose bot with following features:
-
-♟️ **Chess Player Info** - Get any Chess.com player stats
-🌍 **IP Location Finder** - Get location details of any IP
-
-**Click buttons below to get started!**
-"""
-    await update.message.reply_text(
-        welcome_msg,
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks"""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data == "chess":
-        await query.edit_message_text(
-            "♟️ **Chess Player Info**\n\nSend me a Chess.com username.\n\nExample: `jim` or `hikaru`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]),
-            parse_mode="Markdown"
-        )
-        context.user_data['mode'] = 'chess'
-        
-    elif data == "ip":
-        await query.edit_message_text(
-            "🌍 **IP Location Finder**\n\nSend me an IP address.\n\nExample: `161.185.160.93`",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]),
-            parse_mode="Markdown"
-        )
-        context.user_data['mode'] = 'ip'
-        
-    elif data == "about":
-        about_text = """
-🤖 **About This Bot**
-
-✅ **Features:**
-• Chess.com Player Stats
-• IP Location Finder
-• Fast & Reliable
-
-📌 **Commands:**
-/start - Show Main Menu
-/help - Get Help
-"""
-        await query.edit_message_text(
-            about_text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back")]]),
-            parse_mode="Markdown"
-        )
-        
-    elif data == "back":
-        await query.edit_message_text(
-            "🏠 **Main Menu**\n\nChoose an option:",
-            reply_markup=get_main_keyboard(),
-            parse_mode="Markdown"
-        )
-        context.user_data['mode'] = None
-
-async def get_chess_player(username: str):
+# ==================== API FUNCTIONS ====================
+def get_chess_player(username):
     """Fetch Chess.com player data"""
-    async with aiohttp.ClientSession() as session:
-        try:
-            url = f"{CHESS_API}/{username}"
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                return None
-        except:
-            return None
+    try:
+        url = f"{CHESS_API}/{username}"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
 
-def format_chess_data(data: dict, username: str):
+def format_chess_data(data, username):
     """Format chess player data"""
     try:
-        last_online = datetime.datetime.fromtimestamp(data.get('last_online', 0)).strftime('%Y-%m-%d %H:%M:%S')
-        joined = datetime.datetime.fromtimestamp(data.get('joined', 0)).strftime('%Y-%m-%d')
+        last_online = datetime.datetime.fromtimestamp(
+            data.get('last_online', 0)
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        joined = datetime.datetime.fromtimestamp(
+            data.get('joined', 0)
+        ).strftime('%Y-%m-%d')
         
         msg = f"""
 ♟️ **Chess Player: {data.get('username', username)}**
@@ -151,21 +115,20 @@ def format_chess_data(data: dict, username: str):
     except:
         return "❌ Error parsing player data"
 
-async def get_ip_info(ip: str):
+def get_ip_info(ip):
     """Fetch IP location data"""
-    async with aiohttp.ClientSession() as session:
-        try:
-            url = f"{IP_API}?ip={ip}"
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    if result.get('status'):
-                        return result.get('data')
-                return None
-        except:
-            return None
+    try:
+        url = f"{IP_API}?ip={ip}"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('status'):
+                return result.get('data')
+        return None
+    except:
+        return None
 
-def format_ip_data(data: dict, ip: str):
+def format_ip_data(data, ip):
     """Format IP location data"""
     try:
         msg = f"""
@@ -196,57 +159,104 @@ def format_ip_data(data: dict, ip: str):
     except:
         return "❌ Error parsing IP data"
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle user messages"""
-    text = update.message.text.strip()
-    mode = context.user_data.get('mode')
+# ==================== WEBHOOK HANDLER ====================
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Receive updates from Telegram"""
+    data = request.get_json()
     
-    if mode == 'chess':
-        await update.message.chat.send_action(action="typing")
-        data = await get_chess_player(text)
-        if data:
-            msg = format_chess_data(data, text)
-            reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Menu", callback_data="back")]
-            ])
-        else:
-            msg = f"❌ Player `{text}` not found.\n\nPlease check the username and try again."
-            reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="back")]
-            ])
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
+    if not data:
+        return "No data", 400
+    
+    # Handle callback queries (button clicks)
+    if "callback_query" in data:
+        callback = data["callback_query"]
+        callback_id = callback["id"]
+        chat_id = callback["message"]["chat"]["id"]
+        message_id = callback["message"]["message_id"]
+        user_data = callback.get("data", "")
         
-    elif mode == 'ip':
-        ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-        if not re.match(ip_pattern, text):
-            await update.message.reply_text(
-                "❌ Invalid IP format!\n\nPlease send a valid IP address.\nExample: `161.185.160.93`",
-                parse_mode="Markdown"
+        # Answer callback immediately
+        answer_callback(callback_id)
+        
+        # Handle different callback data
+        if user_data == "chess":
+            edit_message(
+                chat_id, 
+                message_id,
+                "♟️ **Chess Player Info**\n\nSend me a Chess.com username.\n\nExample: `jim` or `hikaru`",
+                get_back_button()
             )
-            return
+            # Store user mode in memory (simple dict)
+            user_sessions[chat_id] = "chess"
             
-        await update.message.chat.send_action(action="typing")
-        data = await get_ip_info(text)
-        if data:
-            msg = format_ip_data(data, text)
-            reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back to Menu", callback_data="back")]
-            ])
-        else:
-            msg = f"❌ IP `{text}` not found or invalid."
-            reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Back", callback_data="back")]
-            ])
-        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(
-            "Please use the buttons below to select a feature.",
-            reply_markup=get_main_keyboard()
-        )
+        elif user_data == "ip":
+            edit_message(
+                chat_id,
+                message_id,
+                "🌍 **IP Location Finder**\n\nSend me an IP address.\n\nExample: `161.185.160.93`",
+                get_back_button()
+            )
+            user_sessions[chat_id] = "ip"
+            
+        elif user_data == "about":
+            about_text = """
+🤖 **About This Bot**
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/help command"""
-    help_text = """
+✅ **Features:**
+• Chess.com Player Stats
+• IP Location Finder
+• Fast & Reliable
+
+📌 **Commands:**
+/start - Show Main Menu
+/help - Get Help
+"""
+            edit_message(
+                chat_id,
+                message_id,
+                about_text,
+                get_back_button()
+            )
+            
+        elif user_data == "back":
+            edit_message(
+                chat_id,
+                message_id,
+                "🏠 **Main Menu**\n\nChoose an option:",
+                get_main_keyboard()
+            )
+            if chat_id in user_sessions:
+                del user_sessions[chat_id]
+        
+        return "ok", 200
+    
+    # Handle regular messages
+    if "message" in data:
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "")
+        user = message.get("from", {})
+        first_name = user.get("first_name", "User")
+        
+        # Handle /start command
+        if text == "/start":
+            welcome_msg = f"""
+👋 **Hello {first_name}!**
+
+I'm a multi-purpose bot with following features:
+
+♟️ **Chess Player Info** - Get any Chess.com player stats
+🌍 **IP Location Finder** - Get location details of any IP
+
+**Click buttons below to get started!**
+"""
+            send_message(chat_id, welcome_msg, get_main_keyboard())
+            return "ok", 200
+        
+        # Handle /help command
+        if text == "/help":
+            help_text = """
 🤖 **Help Center**
 
 **How to use this bot:**
@@ -260,34 +270,89 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 **Commands:**
 /start - Show main menu
 /help - Show this help
+
+**Example Usernames:**
+• `jim`
+• `hikaru`
+• `magnuscarlsen`
+
+**Example IPs:**
+• `161.185.160.93`
+• `8.8.8.8`
 """
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-async def start_bot():
-    """Start Telegram bot in background"""
-    print("🤖 Bot starting...")
-    application = Application.builder().token(BOT_TOKEN).build()
+            send_message(chat_id, help_text)
+            return "ok", 200
+        
+        # Handle mode-based responses
+        mode = user_sessions.get(chat_id)
+        
+        if mode == "chess":
+            data = get_chess_player(text)
+            if data:
+                msg = format_chess_data(data, text)
+                send_message(chat_id, msg, get_back_button())
+            else:
+                msg = f"❌ Player `{text}` not found.\n\nPlease check the username and try again."
+                send_message(chat_id, msg, get_back_button())
+                
+        elif mode == "ip":
+            # Validate IP format
+            ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+            if not re.match(ip_pattern, text):
+                send_message(
+                    chat_id,
+                    "❌ Invalid IP format!\n\nPlease send a valid IP address.\nExample: `161.185.160.93`",
+                    get_back_button()
+                )
+                return "ok", 200
+                
+            data = get_ip_info(text)
+            if data:
+                msg = format_ip_data(data, text)
+                send_message(chat_id, msg, get_back_button())
+            else:
+                msg = f"❌ IP `{text}` not found or invalid."
+                send_message(chat_id, msg, get_back_button())
+        
+        else:
+            send_message(
+                chat_id,
+                "Please use the buttons below to select a feature.",
+                get_main_keyboard()
+            )
+        
+        return "ok", 200
     
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    return "ok", 200
+
+# ==================== USER SESSIONS ====================
+# Simple in-memory storage (for demo)
+# Production mein Redis ya database use karein
+user_sessions = {}
+
+# ==================== HEALTH CHECK ====================
+@app.route('/')
+def home():
+    return "Bot is running with Flask + Webhook!"
+
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "alive", "users": len(user_sessions)})
+
+@app.route('/setwebhook')
+def set_webhook():
+    """Manually set webhook (optional)"""
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
+    webhook_url = f"{render_url}/webhook"
     
-    print("✅ Bot is running!")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-# ==================== FASTAPI ENDPOINTS ====================
-@app.get("/")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "message": "Bot is running!"}
-
-@app.get("/ping")
-async def ping():
-    """Ping endpoint for uptime monitoring"""
-    return {"status": "alive"}
+    url = f"{TELEGRAM_API_URL}/setWebhook"
+    response = requests.post(url, json={"url": webhook_url})
+    
+    return jsonify(response.json())
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
-    print(f"🚀 Starting server on port {PORT}")
-    uvicorn.run("app:app", host="0.0.0.0", port=PORT)
+    port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 Bot running on port {port}")
+    print(f"📱 Set webhook at: {TELEGRAM_API_URL}/setWebhook?url=YOUR_URL/webhook")
+    app.run(host="0.0.0.0", port=port)
